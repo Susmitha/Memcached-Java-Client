@@ -155,6 +155,7 @@ import org.apache.log4j.Logger;
  * @version 1.5
  */
 public class MemcachedClient {
+	private static final ThreadLocal<Selector> localSelector = new ThreadLocal<Selector>();
 
 	// logger
 	private static Logger log =
@@ -497,12 +498,13 @@ public class MemcachedClient {
 			}
 
 			sock = null;
-		}
+		} finally {
 
 		if ( sock != null ) {
 			sock.close();
 			sock = null;
 		}
+        }
 
 		return false;
 	}
@@ -699,6 +701,7 @@ public class MemcachedClient {
 		// get SockIO obj
 		SockIOPool.SockIO sock = pool.getSock( key, hashCode );
 		
+        try {
 		if ( sock == null ) {
 			if ( errorHandler != null )
 				errorHandler.handleErrorOnSet( this, new IOException( "no socket to server available" ), key );
@@ -865,12 +868,12 @@ public class MemcachedClient {
 
 			sock = null;
 		}
-
+        } finally {
 		if ( sock != null ) {
 			sock.close();
 			sock = null;
 		}
-
+        }
 		return false;
 	}
 
@@ -1195,11 +1198,12 @@ public class MemcachedClient {
 
 			sock = null;
 		}
-		
+		finally {
 		if ( sock != null ) {
 			sock.close();
 			sock = null;
 		}
+        }
 
 		return -1;
 	}
@@ -1427,10 +1431,10 @@ public class MemcachedClient {
 			}
 			sock = null;
 	    }
-
+        finally {
 		if ( sock != null )
 			sock.close();
-
+        }
 		return null;
 	}
 
@@ -1854,12 +1858,13 @@ public class MemcachedClient {
 				success = false;
 				sock = null;
 			}
-
+            finally {
 			if ( sock != null ) {
 				sock.close();
 				sock = null;
 			}
 		}
+        }
 
 		return success;
 	}
@@ -2066,18 +2071,18 @@ public class MemcachedClient {
 
 				sock = null;
 			}
-
+            finally {
 			if ( sock != null ) {
 				sock.close();
 				sock = null;
 			}
 		}
+        }
 
 		return statsMaps;
 	}
 
 	protected final class NIOLoader {
-		protected Selector selector;
 		protected int numConns = 0;
 		protected MemcachedClient mc;
 		protected Connection[] conns;
@@ -2094,7 +2099,7 @@ public class MemcachedClient {
 			public SocketChannel channel;
 			private boolean isDone = false;
 			
-			public Connection( SockIOPool.SockIO sock, StringBuilder request ) throws IOException {
+			public Connection(SockIOPool.SockIO sock, StringBuilder request, Selector selector) throws IOException {
 				if ( log.isDebugEnabled() )
 					log.debug( "setting up connection to "+sock.getHost() );
 				
@@ -2179,8 +2184,9 @@ public class MemcachedClient {
 		public void doMulti( boolean asString, Map<String, StringBuilder> sockKeys, String[] keys, Map<String, Object> ret ) {
 		
 			long timeRemaining = 0;
+            Selector selector=null;
 			try {
-				selector = Selector.open();
+                selector = openSelector();
 				
 				// get the sockets, flip them to non-blocking, and set up data
 				// structures
@@ -2198,7 +2204,7 @@ public class MemcachedClient {
 						return;
 					}
 
-					conns[numConns++] = new Connection( sock, sockKeys.get( host ) );
+					conns[numConns++] = new Connection( sock, sockKeys.get( host ), selector );
 				}
 				
 				// the main select loop; ends when
@@ -2242,8 +2248,7 @@ public class MemcachedClient {
 				// run through our conns and either return them to the pool
 				// or forcibly close them
 				try {
-					if ( selector != null )
-						selector.close();
+                    closeSelector(selector);
 				}
 				catch ( IOException ignoreMe ) { }
 				
@@ -2268,6 +2273,29 @@ public class MemcachedClient {
 			}
 		}
 		
+        private void closeSelector(Selector selector )
+                throws IOException
+        {
+            if(selector==null)
+                return;
+            for (SelectionKey key : selector.keys()) {
+                key.attach(null);
+                key.cancel();
+            };
+            selector.selectNow();
+        }
+
+        private Selector openSelector()
+                throws IOException
+        {
+            Selector selector = localSelector.get();
+            if(selector!=null)
+                return selector;
+            selector = Selector.open();
+            localSelector.set(selector);
+            return selector;
+        }
+
 		private void handleError( Throwable e, String[] keys ) {
 		    // if we have an errorHandler, use its hook
 		    if ( errorHandler != null )
